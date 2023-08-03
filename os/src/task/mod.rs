@@ -15,7 +15,9 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_us;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
@@ -79,6 +81,9 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
+        if next_task.first_start_time.is_none() {
+            next_task.first_start_time = Some(get_time_us());
+        }
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -140,6 +145,9 @@ impl TaskManager {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+            if inner.tasks[next].first_start_time.is_none() {
+                inner.tasks[next].first_start_time = Some(get_time_us());
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
@@ -152,6 +160,53 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    fn increment_current_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let times = *inner.tasks[current]
+            .syscall_times
+            .get(&syscall_id)
+            .unwrap_or(&0);
+        inner.tasks[current]
+            .syscall_times
+            .insert(syscall_id, times + 1);
+    }
+
+    fn get_current_syscall_times(&self, syscall_times: &mut [u32]) {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        for (&k, &v) in inner.tasks[current].syscall_times.iter() {
+            syscall_times[k] = v
+        }
+    }
+
+    fn get_current_first_start_time(&self) -> Option<usize> {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].first_start_time
+    }
+
+    fn insert_current_framed_area(
+        &self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current]
+            .memory_set
+            .insert_framed_area(start_va, end_va, permission);
+    }
+
+    fn remove_current_framed_area(&self, start_va: VirtAddr, end_va: VirtAddr) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current]
+            .memory_set
+            .remove_framed_area(start_va, end_va);
     }
 }
 
@@ -201,4 +256,29 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Increment current task syscall count
+pub fn increment_current_syscall_times(syscall_id: usize) {
+    TASK_MANAGER.increment_current_syscall_times(syscall_id);
+}
+
+/// Get current task syscall count
+pub fn current_syscall_times(syscall_times: &mut [u32]) {
+    TASK_MANAGER.get_current_syscall_times(syscall_times)
+}
+
+/// Get current task first start time
+pub fn current_first_start_time() -> Option<usize> {
+    TASK_MANAGER.get_current_first_start_time()
+}
+
+/// insert framed area for current task
+pub fn insert_current_framed_area(start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) {
+    TASK_MANAGER.insert_current_framed_area(start_va, end_va, permission);
+}
+
+/// remove framed area for current task
+pub fn remove_current_framed_area(start_va: VirtAddr, end_va: VirtAddr) {
+    TASK_MANAGER.remove_current_framed_area(start_va, end_va);
 }

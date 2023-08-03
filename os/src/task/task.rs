@@ -1,4 +1,6 @@
 //! Types related to task management
+use hashbrown::HashMap;
+
 use super::TaskContext;
 use crate::config::TRAP_CONTEXT_BASE;
 use crate::mm::{
@@ -28,6 +30,12 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Count for each syscall
+    pub syscall_times: HashMap<usize, u32>,
+
+    /// App first start time
+    pub first_start_time: Option<usize>,
 }
 
 impl TaskControlBlock {
@@ -63,6 +71,8 @@ impl TaskControlBlock {
             base_size: user_sp,
             heap_bottom: user_sp,
             program_brk: user_sp,
+            syscall_times: HashMap::new(),
+            first_start_time: None,
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.get_trap_cx();
