@@ -1,9 +1,18 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
-use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use crate::config::PAGE_SIZE;
+use crate::task::current_task;
+
+use super::address::VPNRange;
+use super::{
+    frame_alloc, FrameTracker, MapPermission, PhysAddr, PhysPageNum, StepByOne, VirtAddr,
+    VirtPageNum,
+};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
+use core::mem;
+use core::slice;
 
 bitflags! {
     /// page table entry flags
@@ -275,4 +284,85 @@ impl Iterator for UserBufferIterator {
             Some(r)
         }
     }
+}
+/// Copy kernel data to user space pointer area
+pub fn copy_kernel_data<T>(token: usize, kernel_data: &T, ptr: *mut T) {
+    let page_table = PageTable::from_token(token);
+
+    let mut kernel_data_slice =
+        unsafe { slice::from_raw_parts(kernel_data as *const _ as *const u8, mem::size_of::<T>()) };
+    let mut ptr_start = ptr as usize;
+    let ptr_end = ptr_start + mem::size_of::<T>();
+
+    while ptr_start < ptr_end {
+        let ptr_start_va = VirtAddr::from(ptr_start);
+        let mut vpn = ptr_start_va.floor();
+        let ppn = page_table.translate(vpn).unwrap().ppn();
+        vpn.step();
+        let mut ptr_end_va: VirtAddr = vpn.into();
+        ptr_end_va = ptr_end_va.min(VirtAddr::from(ptr_end));
+        if ptr_end_va.page_offset() == 0 {
+            let len = PAGE_SIZE - ptr_start_va.page_offset();
+            ppn.get_bytes_array()[ptr_start_va.page_offset()..]
+                .copy_from_slice(&kernel_data_slice[..len]);
+            kernel_data_slice = &kernel_data_slice[len..];
+        } else {
+            let len = ptr_end_va.page_offset() - ptr_start_va.page_offset();
+            ppn.get_bytes_array()[ptr_start_va.page_offset()..ptr_end_va.page_offset()]
+                .copy_from_slice(&kernel_data_slice[..len]);
+            kernel_data_slice = &kernel_data_slice[len..];
+        }
+        ptr_start = ptr_end_va.into();
+    }
+}
+
+/// map pages for current user task, start is page aligned
+/// if error, return -1, else return 0
+pub fn map_pages(token: usize, start: usize, len: usize, permission: MapPermission) -> isize {
+    let page_table = PageTable::from_token(token);
+
+    let (start_va, end_va) = (VirtAddr::from(start), VirtAddr::from(start + len));
+    let start_vpn: VirtPageNum = start_va.into();
+    let end_vpn: VirtPageNum = end_va.ceil().into();
+    let range_vpn = VPNRange::new(start_vpn, end_vpn);
+
+    for vpn in range_vpn {
+        if let Some(pte) = page_table.translate(vpn) {
+            if pte.is_valid() {
+                return -1;
+            }
+        }
+    }
+
+    current_task()
+        .unwrap()
+        .insert_framed_area(start_va, end_va, permission);
+    0
+}
+
+/// unmap pages for current user task, start is page aligned
+/// if error, return -1, else return 0
+pub fn unmap_pages(token: usize, start: usize, len: usize) -> isize {
+    let page_table = PageTable::from_token(token);
+
+    let (start_va, end_va) = (VirtAddr::from(start), VirtAddr::from(start + len));
+    let start_vpn: VirtPageNum = start_va.into();
+    let end_vpn: VirtPageNum = end_va.ceil().into();
+    let range_vpn = VPNRange::new(start_vpn, end_vpn);
+
+    for vpn in range_vpn {
+        match page_table.translate(vpn) {
+            Some(pte) => {
+                if !pte.is_valid() {
+                    return -1;
+                }
+            }
+            None => return -1,
+        }
+    }
+
+    current_task()
+        .unwrap()
+        .remove_area_with_start_vpn(start_vpn);
+    0
 }

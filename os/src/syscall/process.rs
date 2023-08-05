@@ -5,11 +5,15 @@ use alloc::sync::Arc;
 use crate::{
     config::MAX_SYSCALL_NUM,
     fs::{open_file, OpenFlags},
-    mm::{translated_refmut, translated_str},
+    mm::{
+        copy_kernel_data, map_pages, translated_str, unmap_pages, MapPermission,
+        VirtAddr, translated_refmut,
+    },
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next, TaskStatus,
     },
+    timer::get_time_us,
 };
 
 #[repr(C)]
@@ -117,41 +121,79 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    trace!("kernel: sys_get_time");
+    let us = get_time_us();
+    copy_kernel_data(
+        current_user_token(),
+        &TimeVal {
+            sec: us / 1_000_000,
+            usec: us % 1_000_000,
+        },
+        ts,
     );
-    -1
+    0
 }
 
 /// YOUR JOB: Finish sys_task_info to pass testcases
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TaskInfo`] is splitted by two pages ?
-pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_task_info NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
+    trace!("kernel: sys_task_info");
+    const MSEC_PER_MICRO: usize = 1000;
+    let mut ret = TaskInfo {
+        status: TaskStatus::Running,
+        syscall_times: [0; MAX_SYSCALL_NUM],
+        time: (get_time_us()
+            - match current_task().unwrap().get_first_start_time() {
+                Some(x) => {
+                    println!("first start time {}", x);
+                    x
+                }
+                None => return -1,
+            })
+            / MSEC_PER_MICRO,
+    };
+    current_task()
+        .unwrap()
+        .get_syscall_times(&mut ret.syscall_times);
+    copy_kernel_data(current_user_token(), &ret, ti);
+    0
 }
 
-/// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+// YOUR JOB: Implement mmap.
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
+    trace!("kernel: sys_mmap");
+    if port & !0x7 != 0 {
+        return -1;
+    }
+    if port & 0x7 == 0 {
+        return -1;
+    }
+
+    let mut permission = MapPermission::U;
+    if port & 0x1 != 0 {
+        permission |= MapPermission::R;
+    }
+    if port & 0x2 != 0 {
+        permission |= MapPermission::W;
+    }
+    if port & 0x2 != 0 {
+        permission |= MapPermission::X;
+    }
+    if !VirtAddr::from(start).aligned() {
+        return -1;
+    }
+    map_pages(current_user_token(), start, len, permission)
 }
 
-/// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+// YOUR JOB: Implement munmap.
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    trace!("kernel: sys_munmap");
+    if !VirtAddr::from(start).aligned() {
+        return -1;
+    }
+    unmap_pages(current_user_token(), start, len)
 }
 
 /// change data segment size
