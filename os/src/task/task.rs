@@ -1,8 +1,10 @@
 //! Types related to task management & Functions for completely changing TCB
+use hashbrown::HashMap;
+
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::TRAP_CONTEXT_BASE;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{MapPermission, MemorySet, PhysPageNum, VirtAddr, VirtPageNum, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
@@ -68,6 +70,12 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Count for each syscall
+    pub syscall_times: HashMap<usize, u32>,
+
+    /// App first start time
+    pub first_start_time: Option<usize>,
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +126,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    syscall_times: HashMap::new(),
+                    first_start_time: None,
                 })
             },
         };
@@ -191,6 +201,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    syscall_times: HashMap::new(),
+                    first_start_time: None,
                 })
             },
         });
@@ -235,6 +247,46 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// insert framed virtual memory area
+    pub fn insert_framed_area(
+        &self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) {
+        let mut inner = self.inner_exclusive_access();
+        inner
+            .memory_set
+            .insert_framed_area(start_va, end_va, permission);
+    }
+
+    /// remove framed virtual memory area with same start vpn
+    pub fn remove_area_with_start_vpn(&self, start_vpn: VirtPageNum) {
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set.remove_area_with_start_vpn(start_vpn)
+    }
+
+    /// get first start time
+    pub fn get_first_start_time(&self) -> Option<usize> {
+        let inner = self.inner_exclusive_access();
+        inner.first_start_time
+    }
+
+    /// get syscall times
+    pub fn get_syscall_times(&self, syscall_times: &mut [u32]) {
+        let inner = self.inner_exclusive_access();
+        for (&k, &v) in inner.syscall_times.iter() {
+            syscall_times[k] = v
+        }
+    }
+
+    /// increment syscall times
+    pub fn increment_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner_exclusive_access();
+        let times = *inner.syscall_times.get(&syscall_id).unwrap_or(&0);
+        inner.syscall_times.insert(syscall_id, times + 1);
     }
 }
 
