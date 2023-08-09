@@ -356,6 +356,14 @@ impl TaskControlBlock {
                     first_start_time: None,
                     stride: 0,
                     pass: 16,
+                    fd_table: vec![
+                        // 0 -> stdin
+                        Some(Arc::new(Stdin)),
+                        // 1 -> stdout
+                        Some(Arc::new(Stdout)),
+                        // 2 -> stderr
+                        Some(Arc::new(Stdout)),
+                    ],
                 })
             },
         });
