@@ -1,9 +1,12 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
+use crate::config::PAGE_SIZE;
+
 use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
+use core::{mem, slice};
 
 bitflags! {
     /// page table entry flags
@@ -215,6 +218,37 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .translate_va(VirtAddr::from(va))
         .unwrap()
         .get_mut()
+}
+
+/// Copy kernel data to user space pointer area
+pub fn copy_kernel_data<T>(token: usize, kernel_data: &T, ptr: *mut T) {
+    let page_table = PageTable::from_token(token);
+
+    let mut kernel_data_slice =
+        unsafe { slice::from_raw_parts(kernel_data as *const _ as *const u8, mem::size_of::<T>()) };
+    let mut ptr_start = ptr as usize;
+    let ptr_end = ptr_start + mem::size_of::<T>();
+
+    while ptr_start < ptr_end {
+        let ptr_start_va = VirtAddr::from(ptr_start);
+        let mut vpn = ptr_start_va.floor();
+        let ppn = page_table.translate(vpn).unwrap().ppn();
+        vpn.step();
+        let mut ptr_end_va: VirtAddr = vpn.into();
+        ptr_end_va = ptr_end_va.min(VirtAddr::from(ptr_end));
+        if ptr_end_va.page_offset() == 0 {
+            let len = PAGE_SIZE - ptr_start_va.page_offset();
+            ppn.get_bytes_array()[ptr_start_va.page_offset()..]
+                .copy_from_slice(&kernel_data_slice[..len]);
+            kernel_data_slice = &kernel_data_slice[len..];
+        } else {
+            let len = ptr_end_va.page_offset() - ptr_start_va.page_offset();
+            ppn.get_bytes_array()[ptr_start_va.page_offset()..ptr_end_va.page_offset()]
+                .copy_from_slice(&kernel_data_slice[..len]);
+            kernel_data_slice = &kernel_data_slice[len..];
+        }
+        ptr_start = ptr_end_va.into();
+    }
 }
 
 /// An abstraction over a buffer passed from user space to kernel space

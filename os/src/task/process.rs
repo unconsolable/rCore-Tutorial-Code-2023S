@@ -14,6 +14,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use hashbrown::{HashMap, HashSet};
 
 /// Process Control Block
 pub struct ProcessControlBlock {
@@ -45,8 +46,22 @@ pub struct ProcessControlBlockInner {
     pub task_res_allocator: RecycleAllocator,
     /// mutex list
     pub mutex_list: Vec<Option<Arc<dyn Mutex>>>,
+    /// mutex available
+    pub mutex_available: HashMap<usize, usize>,
+    /// mutex allocation
+    pub mutex_allocation: HashMap<usize, HashMap<usize, usize>>,
+    /// mutex need
+    pub mutex_need: HashMap<usize, HashMap<usize, usize>>,
     /// semaphore list
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
+    /// semaphore available
+    pub semaphore_available: HashMap<usize, usize>,
+    /// semaphore allocation
+    pub semaphore_allocation: HashMap<usize, HashMap<usize, usize>>,
+    /// semaphore need
+    pub semaphore_need: HashMap<usize, HashMap<usize, usize>>,
+    /// enable deadlock detect
+    pub enable_deadlock_detect: bool,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
 }
@@ -81,6 +96,141 @@ impl ProcessControlBlockInner {
     /// get a task with tid in this process
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
+    }
+    /// increment mutex available
+    pub fn increment_mutex_available(&mut self, id: usize) {
+        self.mutex_available
+            .insert(id, *self.mutex_available.get(&id).unwrap_or(&0) + 1);
+    }
+    /// decrement mutex available
+    pub fn decrement_mutex_available(&mut self, id: usize) {
+        *self.mutex_available.get_mut(&id).unwrap() -= 1;
+    }
+    /// increment mutex need
+    pub fn increment_mutex_need(&mut self, tid: usize, id: usize) {
+        if self.mutex_need.get(&tid).is_none() {
+            self.mutex_need.insert(tid, HashMap::new());
+        }
+        let thread_need = self.mutex_need.get_mut(&tid).unwrap();
+        thread_need.insert(id, *thread_need.get(&id).unwrap_or(&0) + 1);
+    }
+    /// decrement mutex need
+    pub fn decrement_mutex_need(&mut self, tid: usize, id: usize) {
+        let thread_need = self.mutex_need.get_mut(&tid).unwrap();
+        *thread_need.get_mut(&id).unwrap() -= 1;
+    }
+    /// increment mutex allocation
+    pub fn increment_mutex_allocation(&mut self, tid: usize, id: usize) {
+        if self.mutex_allocation.get(&tid).is_none() {
+            self.mutex_allocation.insert(tid, HashMap::new());
+        }
+        let thread_allocation = self.mutex_allocation.get_mut(&tid).unwrap();
+        thread_allocation.insert(id, *thread_allocation.get(&id).unwrap_or(&0) + 1);
+    }
+    /// decrement mutex allocation
+    pub fn decrement_mutex_allocation(&mut self, tid: usize, id: usize) {
+        let thread_allocation = self.mutex_allocation.get_mut(&tid).unwrap();
+        *thread_allocation.get_mut(&id).unwrap() -= 1;
+    }
+    /// increment semaphore available
+    pub fn increment_semaphore_available(&mut self, id: usize, res_count: usize) {
+        self.semaphore_available.insert(
+            id,
+            *self.semaphore_available.get(&id).unwrap_or(&0) + res_count,
+        );
+    }
+    /// decrement semaphore available
+    pub fn decrement_semaphore_available(&mut self, id: usize, res_count: usize) {
+        *self.semaphore_available.get_mut(&id).unwrap() -= res_count;
+    }
+    /// increment semaphore need
+    pub fn increment_semaphore_need(&mut self, tid: usize, id: usize) {
+        if self.semaphore_need.get(&tid).is_none() {
+            self.semaphore_need.insert(tid, HashMap::new());
+        }
+        let thread_need = self.semaphore_need.get_mut(&tid).unwrap();
+        thread_need.insert(id, *thread_need.get(&id).unwrap_or(&0) + 1);
+    }
+    /// decrement semaphore need
+    pub fn decrement_semaphore_need(&mut self, tid: usize, id: usize) {
+        let thread_need = self.semaphore_need.get_mut(&tid).unwrap();
+        *thread_need.get_mut(&id).unwrap() -= 1;
+    }
+    /// increment semaphore allocation
+    pub fn increment_semaphore_allocation(&mut self, tid: usize, id: usize) {
+        if self.semaphore_allocation.get(&tid).is_none() {
+            self.semaphore_allocation.insert(tid, HashMap::new());
+        }
+        let thread_allocation = self.semaphore_allocation.get_mut(&tid).unwrap();
+        thread_allocation.insert(id, *thread_allocation.get(&id).unwrap_or(&0) + 1);
+    }
+    /// decrement semaphore allocation
+    pub fn decrement_semaphore_allocation(&mut self, tid: usize, id: usize) {
+        let thread_allocation = match self.semaphore_allocation.get_mut(&tid) {
+            Some(x) => x,
+            None => return, // thread call semaphore_up before semaphore_down, no allocation, so no action
+        };
+        match thread_allocation.get_mut(&id) {
+            Some(x) => *x -= 1,
+            None => return, // thread call semaphore_up before semaphore_down, no allocation, so no action
+        }
+    }
+    /// deadlock detect
+    pub fn deadlock_detect(&self) -> bool {
+        if !self.enable_deadlock_detect {
+            return false;
+        }
+        let detect = |available: &HashMap<usize, usize>,
+                      need: &HashMap<usize, HashMap<usize, usize>>,
+                      allocation: &HashMap<usize, HashMap<usize, usize>>|
+         -> bool {
+            let mut work: HashMap<usize, usize> = available.clone();
+            let mut finish: HashMap<usize, bool> =
+                HashMap::from_iter(work.keys().map(|x| (*x, false)));
+            let threads: HashSet<usize> = HashSet::from_iter(work.keys().map(|x| *x));
+            for th in threads.iter() {
+                if *finish.get(th).unwrap() {
+                    continue;
+                }
+
+                let mut found = false;
+                for res in available.keys() {
+                    if need.get(th).is_none() || need.get(th).unwrap().get(res) <= work.get(res) {
+                        found = true;
+                    } else {
+                        found = false;
+                        break;
+                    }
+                }
+
+                if found {
+                    for res in available.keys() {
+                        *work.get_mut(res).unwrap() += match allocation.get(th) {
+                            Some(x) => *x.get(res).unwrap_or(&0),
+                            None => 0,
+                        }
+                    }
+                    *finish.get_mut(th).unwrap() = true;
+                } else {
+                    break;
+                }
+            }
+            for th in threads.iter() {
+                if !*finish.get(th).unwrap() {
+                    return true;
+                }
+            }
+            false
+        };
+        detect(
+            &self.mutex_available,
+            &self.mutex_need,
+            &self.mutex_allocation,
+        ) || detect(
+            &self.semaphore_available,
+            &self.semaphore_need,
+            &self.semaphore_allocation,
+        )
     }
 }
 
@@ -119,6 +269,13 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    mutex_available: HashMap::new(),
+                    mutex_allocation: HashMap::new(),
+                    mutex_need: HashMap::new(),
+                    semaphore_available: HashMap::new(),
+                    semaphore_allocation: HashMap::new(),
+                    semaphore_need: HashMap::new(),
+                    enable_deadlock_detect: false,
                 })
             },
         });
@@ -245,6 +402,13 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    mutex_available: HashMap::new(),
+                    mutex_allocation: HashMap::new(),
+                    mutex_need: HashMap::new(),
+                    semaphore_available: HashMap::new(),
+                    semaphore_allocation: HashMap::new(),
+                    semaphore_need: HashMap::new(),
+                    enable_deadlock_detect: false,
                 })
             },
         });

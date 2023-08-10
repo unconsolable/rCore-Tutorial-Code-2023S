@@ -87,6 +87,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // here we do not remove the thread since we are still using the kstack
     // it will be deallocated when sys_waittid is called
     drop(task_inner);
+    // remove deadlock related data
+    {
+        let mut process_inner = process.inner_exclusive_access();
+        process_inner.mutex_need.remove(&tid);
+        process_inner.mutex_allocation.remove(&tid);
+        process_inner.semaphore_need.remove(&tid);
+        process_inner.semaphore_allocation.remove(&tid);
+    }
 
     // Move the task to stop-wait status, to avoid kernel stack from being freed
     if tid == 0 {
